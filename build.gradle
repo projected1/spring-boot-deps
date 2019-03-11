@@ -1,0 +1,118 @@
+plugins {
+    id 'java'
+    id 'org.owasp.dependencycheck' version '5.0.0-M1'
+    id 'org.springframework.boot' version '2.1.3.RELEASE'
+    id 'io.spring.dependency-management' version '1.0.7.RELEASE'
+}
+
+repositories {
+    mavenCentral()
+    jcenter()
+}
+
+def depsGradleFile = 'gradle/deps.gradle'
+if (file(depsGradleFile).exists()) {
+    apply from: depsGradleFile
+}
+
+task initDepsList {
+    doLast {
+        // Download the Spring Boot BOM file
+        def springBootVersion = dependencyManagement.managedVersions['org.springframework.boot:spring-boot']
+        def bomUrl = new URL("https://raw.githubusercontent.com/spring-projects/spring-boot/v${springBootVersion}/spring-boot-project/spring-boot-dependencies/pom.xml")
+        def bom = bomUrl.text
+
+        // Parse dependencies, in Gradle format
+        def matcher = bom =~ /<dependency>[\s\S]*?<groupId>([^<]+)[\s\S]*?<artifactId>([^<]+)/
+
+        new File(depsGradleFile).withWriter { out ->
+            out.println '/*'
+            out.println ' * This is an auto-generated file. Do not modify manually.'
+            out.println ' * Any manual changes will be overwritten without warning!'
+            out.println ' */'
+            out.println 'dependencies {'
+            matcher.each { match ->
+                out.println "    implementation '${match[1]}:${match[2]}'"
+            }
+            out.println '}'
+        }
+    }
+}
+
+// Resolves dependencies and their corresponding JAR files
+def resolveDeps() {
+    Set deps = []
+    configurations.each { config ->
+        if (config.canBeResolved) {
+            config.resolvedConfiguration.lenientConfiguration.artifacts.each { artifact ->
+                def module = artifact.getModuleVersion().toString()
+                def jarFile = artifact.file.getName().toString()
+                deps.add(module + "~" + jarFile)
+            }
+        }
+    }
+    return deps
+}
+
+// Resolves direct dependencies (no transitive dependencies)
+task resolveDirectDeps {
+    doLast {
+        configurations.all {
+            transitive = false
+        }
+
+        Set deps = []
+        configurations.each { config ->
+            if (config.canBeResolved) {
+                config.resolvedConfiguration.lenientConfiguration.artifacts.each { artifact ->
+                    def module = artifact.getModuleVersion().toString()
+                    deps.add(module)
+                }
+            }
+        }
+
+        new File('deps_direct.log').withWriter { out ->
+            deps.each {
+                out.println it
+            }
+        }
+    }
+}
+
+// Resolves transitive dependencies
+task resolveAllDeps {
+    doLast {
+        new File('deps.log').withWriter { out ->
+            resolveDeps().each {
+                out.println it
+            }
+        }
+    }
+}
+
+// Compares all transitive dependencies with
+// previously stored baseline, and shows any
+// missing dependencies.
+task validateDeps {
+    doLast {
+        def baselineDeps = []
+        new File('deps.log').eachLine { line ->
+            baselineDeps.add(line)
+        }
+
+        Set diff = baselineDeps - resolveDeps()
+        if (diff.isEmpty()) {
+            println 'OK'
+
+        } else {
+            def missingCnt = 0
+            new File('diff.log').withWriter { out ->
+                diff.each {
+                    missingCnt++
+                    out.println it
+                }
+            }
+            println "Missing ${missingCnt} dependenc${missingCnt > 1 ? 'ies' : 'y'}! See log for details."
+        }
+    }
+}
